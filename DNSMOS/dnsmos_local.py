@@ -9,20 +9,28 @@ import os
 
 import librosa
 import numpy as np
-import numpy.polynomial.polynomial as poly
 import onnxruntime as ort
 import pandas as pd
 import soundfile as sf
-from requests import session
 from tqdm import tqdm
 
 SAMPLING_RATE = 16000
 INPUT_LENGTH = 9.01
 
 class ComputeScore:
-    def __init__(self, primary_model_path, p808_model_path) -> None:
-        self.onnx_sess = ort.InferenceSession(primary_model_path)
-        self.p808_onnx_sess = ort.InferenceSession(p808_model_path)
+    def __init__(self) -> None:
+        # Note on the execution providers: we can get them from onnxruntime.get_available_providers(),
+        #  which returns this: ['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+        #  However, when provided in the InferenceSession "providers" parameters, onnxruntime complains 
+        #  that the TensorRT libraries are not installed. So I'm manually setting the providers to 
+        #  'CUDAExecutionProvider' and 'CPUExecutionProvider'.
+        providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+        
+        curdir = os.path.dirname(os.path.abspath(__file__))
+        primary_model_path = os.path.join(curdir, "DNSMOS", "sig_bak_ovr.onnx")
+        p808_model_path = os.path.join(curdir, "DNSMOS", "model_v8.onnx")
+        self.onnx_sess = ort.InferenceSession(primary_model_path, providers=providers)
+        self.p808_onnx_sess = ort.InferenceSession(p808_model_path, providers=providers)
         
     def audio_melspec(self, audio, n_mels=120, frame_size=320, hop_length=160, sr=16000, to_db=True):
         mel_spec = librosa.feature.melspectrogram(y=audio, sr=sr, n_fft=frame_size+1, hop_length=hop_length, n_mels=n_mels)
@@ -46,20 +54,14 @@ class ComputeScore:
 
         return sig_poly, bak_poly, ovr_poly
 
-    def __call__(self, fpath, sampling_rate, is_personalized_MOS):
-        aud, input_fs = sf.read(fpath)
-        fs = sampling_rate
-        if input_fs != fs:
-            audio = librosa.resample(aud, input_fs, fs)
-        else:
-            audio = aud
+    def __call__(self, audio: np.ndarray, sampling_rate: int, is_personalized_MOS=False):
         actual_audio_len = len(audio)
-        len_samples = int(INPUT_LENGTH*fs)
+        len_samples = int(INPUT_LENGTH * sampling_rate)
         while len(audio) < len_samples:
             audio = np.append(audio, audio)
         
-        num_hops = int(np.floor(len(audio)/fs) - INPUT_LENGTH)+1
-        hop_len_samples = fs
+        num_hops = int(np.floor(len(audio) / sampling_rate) - INPUT_LENGTH) + 1
+        hop_len_samples = sampling_rate
         predicted_mos_sig_seg_raw = []
         predicted_mos_bak_seg_raw = []
         predicted_mos_ovr_seg_raw = []
@@ -69,7 +71,7 @@ class ComputeScore:
         predicted_p808_mos = []
 
         for idx in range(num_hops):
-            audio_seg = audio[int(idx*hop_len_samples) : int((idx+INPUT_LENGTH)*hop_len_samples)]
+            audio_seg = audio[int(idx * hop_len_samples):int((idx + INPUT_LENGTH) * hop_len_samples)]
             if len(audio_seg) < len_samples:
                 continue
 
@@ -88,7 +90,7 @@ class ComputeScore:
             predicted_mos_ovr_seg.append(mos_ovr)
             predicted_p808_mos.append(p808_mos)
 
-        clip_dict = {'filename': fpath, 'len_in_sec': actual_audio_len/fs, 'sr':fs}
+        clip_dict = {'len_in_sec': actual_audio_len/sampling_rate, 'sr': sampling_rate}
         clip_dict['num_hops'] = num_hops
         clip_dict['OVRL_raw'] = np.mean(predicted_mos_ovr_seg_raw)
         clip_dict['SIG_raw'] = np.mean(predicted_mos_sig_seg_raw)
