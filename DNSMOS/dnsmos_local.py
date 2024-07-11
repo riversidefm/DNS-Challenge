@@ -54,7 +54,13 @@ class ComputeScore:
 
         return sig_poly, bak_poly, ovr_poly
 
-    def __call__(self, audio: np.ndarray, sampling_rate: int, is_personalized_MOS=False):
+    def __call__(
+        self, 
+        audio: np.ndarray, 
+        sampling_rate: int, 
+        is_personalized_MOS=False,
+        return_p808=True,
+        ) -> dict:
         actual_audio_len = len(audio)
         len_samples = int(INPUT_LENGTH * sampling_rate)
         while len(audio) < len_samples:
@@ -76,10 +82,7 @@ class ComputeScore:
                 continue
 
             input_features = np.array(audio_seg).astype('float32')[np.newaxis,:]
-            p808_input_features = np.array(self.audio_melspec(audio=audio_seg[:-160])).astype('float32')[np.newaxis, :, :]
             oi = {'input_1': input_features}
-            p808_oi = {'input_1': p808_input_features}
-            p808_mos = self.p808_onnx_sess.run(None, p808_oi)[0][0][0]
             mos_sig_raw,mos_bak_raw,mos_ovr_raw = self.onnx_sess.run(None, oi)[0][0]
             mos_sig,mos_bak,mos_ovr = self.get_polyfit_val(mos_sig_raw,mos_bak_raw,mos_ovr_raw,is_personalized_MOS)
             predicted_mos_sig_seg_raw.append(mos_sig_raw)
@@ -88,7 +91,11 @@ class ComputeScore:
             predicted_mos_sig_seg.append(mos_sig)
             predicted_mos_bak_seg.append(mos_bak)
             predicted_mos_ovr_seg.append(mos_ovr)
-            predicted_p808_mos.append(p808_mos)
+            if return_p808:
+                p808_input_features = np.array(self.audio_melspec(audio=audio_seg[:-160])).astype('float32')[np.newaxis, :, :]
+                p808_oi = {'input_1': p808_input_features}
+                p808_mos = self.p808_onnx_sess.run(None, p808_oi)[0][0][0]
+                predicted_p808_mos.append(p808_mos)
 
         clip_dict = {'len_in_sec': actual_audio_len/sampling_rate, 'sr': sampling_rate}
         clip_dict['num_hops'] = num_hops
