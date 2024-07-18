@@ -105,7 +105,8 @@ class ComputeScore:
         clip_dict['OVRL'] = np.mean(predicted_mos_ovr_seg)
         clip_dict['SIG'] = np.mean(predicted_mos_sig_seg)
         clip_dict['BAK'] = np.mean(predicted_mos_bak_seg)
-        clip_dict['P808_MOS'] = np.mean(predicted_p808_mos)
+        if return_p808:
+            clip_dict['P808_MOS'] = np.mean(predicted_p808_mos)
         return clip_dict
 
 def main(args):
