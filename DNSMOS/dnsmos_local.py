@@ -6,6 +6,7 @@ import argparse
 import concurrent.futures
 import glob
 import os
+from typing import Optional, Tuple
 
 import librosa
 import numpy as np
@@ -17,36 +18,69 @@ from tqdm import tqdm
 SAMPLING_RATE = 16000
 INPUT_LENGTH = 9.01
 
+DEFAULT_ORT_PROVIDERS = ("CUDAExecutionProvider", "CPUExecutionProvider")
 class ComputeScore:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        session_options: Optional[ort.SessionOptions] = None,
+        providers: Tuple[str, ...] = DEFAULT_ORT_PROVIDERS,
+    ) -> None:
         # Note on the execution providers: we can get them from onnxruntime.get_available_providers(),
         #  which returns this: ['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
-        #  However, when provided in the InferenceSession "providers" parameters, onnxruntime complains 
-        #  that the TensorRT libraries are not installed. So I'm manually setting the providers to 
+        #  However, when provided in the InferenceSession "providers" parameters, onnxruntime complains
+        #  that the TensorRT libraries are not installed. So I'm manually setting the providers to
         #  'CUDAExecutionProvider' and 'CPUExecutionProvider'.
-        providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-        
+
         curdir = os.path.dirname(os.path.abspath(__file__))
-        primary_model_path = os.path.join(curdir, "DNSMOS", "sig_bak_ovr.onnx")
-        p808_model_path = os.path.join(curdir, "DNSMOS", "model_v8.onnx")
-        self.onnx_sess = ort.InferenceSession(primary_model_path, providers=providers)
-        self.p808_onnx_sess = ort.InferenceSession(p808_model_path, providers=providers)
-        
-    def audio_melspec(self, audio, n_mels=120, frame_size=320, hop_length=160, sr=16000, to_db=True):
-        mel_spec = librosa.feature.melspectrogram(y=audio, sr=sr, n_fft=frame_size+1, hop_length=hop_length, n_mels=n_mels)
+        self._primary_model_path = os.path.join(curdir, "DNSMOS", "sig_bak_ovr.onnx")
+        self._p808_model_path = os.path.join(curdir, "DNSMOS", "model_v8.onnx")
+        self._providers = providers
+        self._session_options = session_options
+        self._p808_onnx_sess = None
+        self._onnx_sess = None
+
+        # pre-load the primary model
+        self.onnx_sess
+
+    @property
+    def p808_onnx_sess(self) -> ort.InferenceSession:
+        if self._p808_onnx_sess is None:
+            self._p808_onnx_sess = ort.InferenceSession(
+                self._p808_model_path,
+                providers=self._providers,
+                sess_options=self._session_options,
+            )
+        return self._p808_onnx_sess
+
+    @property
+    def onnx_sess(self) -> ort.InferenceSession:
+        if self._onnx_sess is None:
+            self._onnx_sess = ort.InferenceSession(
+                self._primary_model_path,
+                providers=self._providers,
+                sess_options=self._session_options,
+            )
+        return self._onnx_sess
+
+    def audio_melspec(
+        self, audio, n_mels=120, frame_size=320, hop_length=160, sr=16000, to_db=True
+    ):
+        mel_spec = librosa.feature.melspectrogram(
+            y=audio, sr=sr, n_fft=frame_size + 1, hop_length=hop_length, n_mels=n_mels
+        )
         if to_db:
-            mel_spec = (librosa.power_to_db(mel_spec, ref=np.max)+40)/40
+            mel_spec = (librosa.power_to_db(mel_spec, ref=np.max) + 40) / 40
         return mel_spec.T
 
     def get_polyfit_val(self, sig, bak, ovr, is_personalized_MOS):
         if is_personalized_MOS:
-            p_ovr = np.poly1d([-0.00533021,  0.005101  ,  1.18058466, -0.11236046])
-            p_sig = np.poly1d([-0.01019296,  0.02751166,  1.19576786, -0.24348726])
-            p_bak = np.poly1d([-0.04976499,  0.44276479, -0.1644611 ,  0.96883132])
+            p_ovr = np.poly1d([-0.00533021, 0.005101, 1.18058466, -0.11236046])
+            p_sig = np.poly1d([-0.01019296, 0.02751166, 1.19576786, -0.24348726])
+            p_bak = np.poly1d([-0.04976499, 0.44276479, -0.1644611, 0.96883132])
         else:
-            p_ovr = np.poly1d([-0.06766283,  1.11546468,  0.04602535])
-            p_sig = np.poly1d([-0.08397278,  1.22083953,  0.0052439 ])
-            p_bak = np.poly1d([-0.13166888,  1.60915514, -0.39604546])
+            p_ovr = np.poly1d([-0.06766283, 1.11546468, 0.04602535])
+            p_sig = np.poly1d([-0.08397278, 1.22083953, 0.0052439])
+            p_bak = np.poly1d([-0.13166888, 1.60915514, -0.39604546])
 
         sig_poly = p_sig(sig)
         bak_poly = p_bak(bak)
@@ -55,17 +89,17 @@ class ComputeScore:
         return sig_poly, bak_poly, ovr_poly
 
     def __call__(
-        self, 
-        audio: np.ndarray, 
-        sampling_rate: int, 
+        self,
+        audio: np.ndarray,
+        sampling_rate: int,
         is_personalized_MOS=False,
         return_p808=True,
-        ) -> dict:
+    ) -> dict:
         actual_audio_len = len(audio)
         len_samples = int(INPUT_LENGTH * sampling_rate)
         while len(audio) < len_samples:
             audio = np.append(audio, audio)
-        
+
         num_hops = int(np.floor(len(audio) / sampling_rate) - INPUT_LENGTH) + 1
         hop_len_samples = sampling_rate
         predicted_mos_sig_seg_raw = []
@@ -77,14 +111,18 @@ class ComputeScore:
         predicted_p808_mos = []
 
         for idx in range(num_hops):
-            audio_seg = audio[int(idx * hop_len_samples):int((idx + INPUT_LENGTH) * hop_len_samples)]
+            audio_seg = audio[
+                int(idx * hop_len_samples) : int((idx + INPUT_LENGTH) * hop_len_samples)
+            ]
             if len(audio_seg) < len_samples:
                 continue
 
-            input_features = np.array(audio_seg).astype('float32')[np.newaxis,:]
-            oi = {'input_1': input_features}
-            mos_sig_raw,mos_bak_raw,mos_ovr_raw = self.onnx_sess.run(None, oi)[0][0]
-            mos_sig,mos_bak,mos_ovr = self.get_polyfit_val(mos_sig_raw,mos_bak_raw,mos_ovr_raw,is_personalized_MOS)
+            input_features = np.array(audio_seg).astype("float32")[np.newaxis, :]
+            oi = {"input_1": input_features}
+            mos_sig_raw, mos_bak_raw, mos_ovr_raw = self.onnx_sess.run(None, oi)[0][0]
+            mos_sig, mos_bak, mos_ovr = self.get_polyfit_val(
+                mos_sig_raw, mos_bak_raw, mos_ovr_raw, is_personalized_MOS
+            )
             predicted_mos_sig_seg_raw.append(mos_sig_raw)
             predicted_mos_bak_seg_raw.append(mos_bak_raw)
             predicted_mos_ovr_seg_raw.append(mos_ovr_raw)
@@ -92,22 +130,28 @@ class ComputeScore:
             predicted_mos_bak_seg.append(mos_bak)
             predicted_mos_ovr_seg.append(mos_ovr)
             if return_p808:
-                p808_input_features = np.array(self.audio_melspec(audio=audio_seg[:-160])).astype('float32')[np.newaxis, :, :]
-                p808_oi = {'input_1': p808_input_features}
+                p808_input_features = np.array(
+                    self.audio_melspec(audio=audio_seg[:-160])
+                ).astype("float32")[np.newaxis, :, :]
+                p808_oi = {"input_1": p808_input_features}
                 p808_mos = self.p808_onnx_sess.run(None, p808_oi)[0][0][0]
                 predicted_p808_mos.append(p808_mos)
 
-        clip_dict = {'len_in_sec': actual_audio_len/sampling_rate, 'sr': sampling_rate}
-        clip_dict['num_hops'] = num_hops
-        clip_dict['OVRL_raw'] = np.mean(predicted_mos_ovr_seg_raw)
-        clip_dict['SIG_raw'] = np.mean(predicted_mos_sig_seg_raw)
-        clip_dict['BAK_raw'] = np.mean(predicted_mos_bak_seg_raw)
-        clip_dict['OVRL'] = np.mean(predicted_mos_ovr_seg)
-        clip_dict['SIG'] = np.mean(predicted_mos_sig_seg)
-        clip_dict['BAK'] = np.mean(predicted_mos_bak_seg)
+        clip_dict = {
+            "len_in_sec": actual_audio_len / sampling_rate,
+            "sr": sampling_rate,
+        }
+        clip_dict["num_hops"] = num_hops
+        clip_dict["OVRL_raw"] = np.mean(predicted_mos_ovr_seg_raw)
+        clip_dict["SIG_raw"] = np.mean(predicted_mos_sig_seg_raw)
+        clip_dict["BAK_raw"] = np.mean(predicted_mos_bak_seg_raw)
+        clip_dict["OVRL"] = np.mean(predicted_mos_ovr_seg)
+        clip_dict["SIG"] = np.mean(predicted_mos_sig_seg)
+        clip_dict["BAK"] = np.mean(predicted_mos_bak_seg)
         if return_p808:
-            clip_dict['P808_MOS'] = np.mean(predicted_p808_mos)
+            clip_dict["P808_MOS"] = np.mean(predicted_p808_mos)
         return clip_dict
+
 
 def main(args):
     models = glob.glob(os.path.join(args.testset_dir, "*"))
